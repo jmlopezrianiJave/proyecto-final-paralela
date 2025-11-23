@@ -25,6 +25,8 @@ struct Cell {
 int GEN_PROC_RABBITS, GEN_PROC_FOXES, GEN_FOOD_FOXES;
 int N_GEN, R, C, N;
 
+vector<vector<omp_lock_t>> cell_lock;
+
 const int DX[4] = {-1, 0, 1, 0};  // N, E, S, W
 const int DY[4] = { 0, 1, 0,-1};
 
@@ -50,6 +52,7 @@ vector<pair<int,int>> get_adjacent_of_type(
     return res;
 }
 
+// Selección determinista del vecino (misma que en el secuencial)
 pair<int,int> select_target(
     const vector<pair<int,int>>& cand,
     int G, int x, int y
@@ -60,26 +63,25 @@ pair<int,int> select_target(
     return cand[idx];
 }
 
-// --- Colocación con resolución de conflictos (paralela) ---
+// --- Colocación con resolución de conflictos (paralela, con locks por celda) ---
 
 inline void place_rabbit(
     vector<vector<Cell>>& world_next,
     int x, int y,
     int proc_age
 ) {
-    #pragma omp critical(rabbit_lock)
-    {
-        Cell &cell = world_next[x][y];
-        if (cell.type == EMPTY) {
-            cell.type = RABBIT;
+    omp_set_lock(&cell_lock[x][y]);
+    Cell &cell = world_next[x][y];
+    if (cell.type == EMPTY) {
+        cell.type = RABBIT;
+        cell.rabbit.proc_age = proc_age;
+    } else if (cell.type == RABBIT) {
+        if (proc_age > cell.rabbit.proc_age) {
             cell.rabbit.proc_age = proc_age;
-        } else if (cell.type == RABBIT) {
-            if (proc_age > cell.rabbit.proc_age) {
-                cell.rabbit.proc_age = proc_age;
-            }
         }
-        // Si hay ROCK o FOX, no deberíamos intentarlo
     }
+    // Si hay ROCK o FOX, no deberíamos intentarlo
+    omp_unset_lock(&cell_lock[x][y]);
 }
 
 inline void place_fox(
@@ -88,34 +90,31 @@ inline void place_fox(
     int proc_age,
     int food_age
 ) {
-    #pragma omp critical(fox_lock)
-    {
-        Cell &cell = world_next[x][y];
-
-        // Si es roca, no hacemos nada (¡sin return!)
-        if (cell.type == ROCK) {
-            // no cambiamos la roca
-        } else if (cell.type == EMPTY || cell.type == RABBIT) {
-            cell.type = FOX;
+    omp_set_lock(&cell_lock[x][y]);
+    Cell &cell = world_next[x][y];
+    // Si es roca, no hacemos nada (mantenemos la roca)
+    if (cell.type == ROCK) {
+        // no cambiamos la roca
+    } else if (cell.type == EMPTY || cell.type == RABBIT) {
+        cell.type = FOX;
+        cell.fox.proc_age = proc_age;
+        cell.fox.food_age = food_age;
+    } else if (cell.type == FOX) {
+        // 1) mayor proc_age
+        // 2) si empatan, menor food_age (menos hambriento)
+        bool replace = false;
+        if (proc_age > cell.fox.proc_age) {
+            replace = true;
+        } else if (proc_age == cell.fox.proc_age &&
+                   food_age < cell.fox.food_age) {
+            replace = true;
+        }
+        if (replace) {
             cell.fox.proc_age = proc_age;
             cell.fox.food_age = food_age;
-        } else if (cell.type == FOX) {
-            // Conflicto entre zorros:
-            // 1) mayor edad de reproducción
-            // 2) si empatan, menor food_age (menos hambriento)
-            bool replace = false;
-            if (proc_age > cell.fox.proc_age) {
-                replace = true;
-            } else if (proc_age == cell.fox.proc_age &&
-                       food_age < cell.fox.food_age) {
-                replace = true;
-            }
-            if (replace) {
-                cell.fox.proc_age = proc_age;
-                cell.fox.food_age = food_age;
-            }
         }
     }
+    omp_unset_lock(&cell_lock[x][y]);
 }
 
 // --- Movimiento de conejos (paralelo) ---
@@ -142,6 +141,7 @@ vector<vector<Cell>> move_rabbits(
             // en el siguiente mundo iniciamos sin conejos
             world_next[i][j].rabbit.proc_age = 0;
 
+            // si hay conejo en world_curr, vaciamos la casilla en world_next
             if (cell.type == RABBIT) {
                 world_next[i][j].type = EMPTY;
             }
@@ -212,7 +212,7 @@ vector<vector<Cell>> move_foxes(
                 world_next[i][j].rabbit.proc_age = cell.rabbit.proc_age;
             }
 
-            // Inicialmente sin zorros en world_next
+            // En el siguiente mundo empezamos sin zorros
             world_next[i][j].fox.proc_age  = 0;
             world_next[i][j].fox.food_age = 0;
 
@@ -231,8 +231,8 @@ vector<vector<Cell>> move_foxes(
             if (cell.type != FOX) continue;
 
             int ox = i, oy = j;
-            int proc_age = cell.fox.proc_age;   // antes
-            int food_age = cell.fox.food_age;   // antes
+            int proc_age = cell.fox.proc_age;   // edad de reproducción ANTES
+            int food_age = cell.fox.food_age;   // hambre ANTES
 
             int tx = i, ty = j;
             bool moved = false;
@@ -246,12 +246,12 @@ vector<vector<Cell>> move_foxes(
                 tx = p.first;
                 ty = p.second;
                 moved = true;
-                new_food = 0;
+                new_food = 0; // comió
             } else {
                 // 2. No hay conejo adyacente -> aumenta hambre
                 new_food = food_age + 1;
                 if (new_food >= GEN_FOOD_FOXES) {
-                    // muere antes de intentar moverse a celda vacía
+                    // muere de hambre antes de intentar moverse a celda vacía
                     alive = false;
                 } else {
                     // 3. Intentar moverse a celda vacía
@@ -262,7 +262,7 @@ vector<vector<Cell>> move_foxes(
                         ty = p.second;
                         moved = true;
                     } else {
-                        // se queda donde estaba
+                        // Se queda donde está
                         tx = i;
                         ty = j;
                         moved = false;
@@ -286,7 +286,7 @@ vector<vector<Cell>> move_foxes(
             // Colocar al padre
             place_fox(world_next, tx, ty, proc_age_after, new_food);
 
-            // Si procrea, hijo en el origen
+            // Si procrea, dejar cría en la posición original
             if (can_procreate) {
                 place_fox(world_next, ox, oy, 0, 0);
             }
@@ -339,6 +339,13 @@ int main() {
     }
 
     vector<vector<Cell>> world(R, vector<Cell>(C));
+    // Inicializar locks por celda para escritura concurrente segura
+    cell_lock.assign(R, vector<omp_lock_t>(C));
+    for (int i = 0; i < R; ++i) {
+        for (int j = 0; j < C; ++j) {
+            omp_init_lock(&cell_lock[i][j]);
+        }
+    }
 
     for (int k = 0; k < N; ++k) {
         string obj;
@@ -362,5 +369,11 @@ int main() {
     }
 
     print_world(world);
+    // Destruir locks
+    for (int i = 0; i < R; ++i) {
+        for (int j = 0; j < C; ++j) {
+            omp_destroy_lock(&cell_lock[i][j]);
+        }
+    }
     return 0;
 }
