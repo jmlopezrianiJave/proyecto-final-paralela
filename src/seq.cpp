@@ -24,7 +24,7 @@ struct Cell {
 int GEN_PROC_RABBITS, GEN_PROC_FOXES, GEN_FOOD_FOXES;
 int N_GEN, R, C, N;
 
-const int DX[4] = {-1, 0, 1, 0};  // N, E, S, W
+const int DX[4] = {-1, 0, 1, 0};
 const int DY[4] = { 0, 1, 0,-1};
 
 bool inside(int x, int y) {
@@ -57,8 +57,6 @@ pair<int,int> select_target(
     return cand[idx];
 }
 
-// --- Colocación con resolución de conflictos ---
-
 void place_rabbit(
     vector<vector<Cell>>& world_next,
     int x, int y,
@@ -69,12 +67,10 @@ void place_rabbit(
         cell.type = RABBIT;
         cell.rabbit.proc_age = proc_age;
     } else if (cell.type == RABBIT) {
-        // Se queda el conejo con mayor edad de reproducción
         if (proc_age > cell.rabbit.proc_age) {
             cell.rabbit.proc_age = proc_age;
         }
     }
-    // Si hay ROCK o FOX, no debería intentarse colocar conejo
 }
 
 void place_fox(
@@ -86,7 +82,6 @@ void place_fox(
     Cell &cell = world_next[x][y];
 
     if (cell.type == ROCK) {
-        // No se puede ocupar una roca
         return;
     }
 
@@ -95,8 +90,6 @@ void place_fox(
         cell.fox.proc_age = proc_age;
         cell.fox.food_age = food_age;
     } else if (cell.type == FOX) {
-        // Conflicto entre zorros: se queda el que tenga
-        // mayor edad de reproducción; si empatan, el menos hambriento.
         bool replace = false;
         if (proc_age > cell.fox.proc_age) {
             replace = true;
@@ -111,22 +104,18 @@ void place_fox(
     }
 }
 
-// --- Movimiento de conejos ---
-
 vector<vector<Cell>> move_rabbits(
     const vector<vector<Cell>>& world_curr,
     int G
 ) {
     vector<vector<Cell>> world_next(R, vector<Cell>(C));
 
-    // Copiar rocas y zorros; limpiar conejos
     for (int i = 0; i < R; ++i) {
         for (int j = 0; j < C; ++j) {
             const Cell &cell = world_curr[i][j];
             world_next[i][j].type = cell.type;
 
             if (cell.type == ROCK) {
-                // Solo roca, nada más que copiar
                 continue;
             }
 
@@ -134,23 +123,20 @@ vector<vector<Cell>> move_rabbits(
                 world_next[i][j].fox = Fox(cell.fox.proc_age, cell.fox.food_age);
             }
 
-            // En el siguiente mundo empezamos sin conejos
             world_next[i][j].rabbit.proc_age = 0;
 
-            // Eliminar conejos para volverlos a poner según su movimiento
             if (cell.type == RABBIT) {
                 world_next[i][j].type = EMPTY;
             }
         }
     }
 
-    // Mover todos los conejos simultáneamente
     for (int i = 0; i < R; ++i) {
         for (int j = 0; j < C; ++j) {
             const Cell &cell = world_curr[i][j];
             if (cell.type != RABBIT) continue;
 
-            int age = cell.rabbit.proc_age;      // edad ANTES de esta generación
+            int age = cell.rabbit.proc_age;
             int ox = i, oy = j;
             int tx = i, ty = j;
             bool moved = false;
@@ -166,16 +152,13 @@ vector<vector<Cell>> move_rabbits(
             bool can_procreate =
                 (age >= GEN_PROC_RABBITS) && moved;
 
-            // Edad del padre DESPUÉS de la generación
             int parent_age_after = age + 1;
             if (can_procreate) {
                 parent_age_after = 0;
             }
 
-            // Colocamos al padre en la nueva posición
             place_rabbit(world_next, tx, ty, parent_age_after);
 
-            // Si procrea, dejamos un hijo en la posición original
             if (can_procreate) {
                 place_rabbit(world_next, ox, oy, 0);
             }
@@ -185,15 +168,12 @@ vector<vector<Cell>> move_rabbits(
     return world_next;
 }
 
-// --- Movimiento de zorros ---
-
 vector<vector<Cell>> move_foxes(
     const vector<vector<Cell>>& world_curr,
     int G
 ) {
     vector<vector<Cell>> world_next(R, vector<Cell>(C));
 
-    // Copiar rocas y conejos; limpiar zorros
     for (int i = 0; i < R; ++i) {
         for (int j = 0; j < C; ++j) {
             const Cell &cell = world_curr[i][j];
@@ -207,48 +187,41 @@ vector<vector<Cell>> move_foxes(
                 world_next[i][j].rabbit.proc_age = cell.rabbit.proc_age;
             }
 
-            // En el siguiente mundo empezamos sin zorros
             world_next[i][j].fox.proc_age = 0;
             world_next[i][j].fox.food_age = 0;
 
             if (cell.type == FOX) {
-                // Vaciar la casilla donde estaba el zorro
                 world_next[i][j].type = EMPTY;
             }
         }
     }
 
-    // Mover todos los zorros simultáneamente
     for (int i = 0; i < R; ++i) {
         for (int j = 0; j < C; ++j) {
             const Cell &cell = world_curr[i][j];
             if (cell.type != FOX) continue;
 
             int ox = i, oy = j;
-            int proc_age = cell.fox.proc_age;   // edad de reproducción ANTES
-            int food_age = cell.fox.food_age;   // hambre ANTES
+            int proc_age = cell.fox.proc_age;
+            int food_age = cell.fox.food_age;
 
             int tx = i, ty = j;
             bool moved = false;
             bool alive = true;
             int new_food = food_age;
 
-            // 1. Intentar comer conejo
             auto rabbits = get_adjacent_of_type(i, j, world_curr, RABBIT);
             if (!rabbits.empty()) {
                 auto p = select_target(rabbits, G, i, j);
                 tx = p.first;
                 ty = p.second;
                 moved = true;
-                new_food = 0; // comió
+                new_food = 0;
             } else {
-                // 2. No hay conejo adyacente -> aumenta hambre
                 new_food = food_age + 1;
                 if (new_food >= GEN_FOOD_FOXES) {
-                    // muere de hambre antes de intentar moverse a celda vacía
                     alive = false;
                 } else {
-                    // 3. Intentar moverse a celda vacía
                     auto empties = get_adjacent_of_type(i, j, world_curr, EMPTY);
                     if (!empties.empty()) {
                         auto p = select_target(empties, G, i, j);
@@ -256,7 +229,6 @@ vector<vector<Cell>> move_foxes(
                         ty = p.second;
                         moved = true;
                     } else {
-                        // Se queda donde está
                         tx = i;
                         ty = j;
                         moved = false;
@@ -265,11 +237,9 @@ vector<vector<Cell>> move_foxes(
             }
 
             if (!alive) {
-                // El zorro muere; no se coloca en el mundo siguiente
                 continue;
             }
 
-            // Reproducción usa la edad ANTES de esta generación
             bool can_procreate =
                 (proc_age >= GEN_PROC_FOXES) && moved;
 
@@ -278,10 +248,8 @@ vector<vector<Cell>> move_foxes(
                 proc_age_after = 0;
             }
 
-            // Colocar al padre
             place_fox(world_next, tx, ty, proc_age_after, new_food);
 
-            // Si procrea, dejar una cría en la posición original
             if (can_procreate) {
                 place_fox(world_next, ox, oy, 0, 0);
             }
@@ -291,10 +259,7 @@ vector<vector<Cell>> move_foxes(
     return world_next;
 }
 
-// --- IO ---
-
 void print_world(const vector<vector<Cell>>& world) {
-    // Contar objetos y luego imprimirlos
     vector<tuple<string,int,int>> objects;
     for (int i = 0; i < R; ++i) {
         for (int j = 0; j < C; ++j) {
@@ -311,7 +276,6 @@ void print_world(const vector<vector<Cell>>& world) {
 
     int final_N = (int)objects.size();
 
-    // Según el enunciado, el 4º parámetro en la salida es 0
     cout << GEN_PROC_RABBITS << " "
          << GEN_PROC_FOXES   << " "
          << GEN_FOOD_FOXES   << " "
@@ -353,7 +317,6 @@ int main() {
         }
     }
 
-    // Simulación de N_GEN generaciones
     for (int G = 0; G < N_GEN; ++G) {
         world = move_rabbits(world, G);
         world = move_foxes(world, G);
